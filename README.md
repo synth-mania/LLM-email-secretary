@@ -46,12 +46,22 @@ email_classifier/
 
 ## Configuration
 
-Edit `config.py` to set:
-- IMAP server details (provided by Proton Mail Bridge)
-- Email credentials
-- LLM server endpoint
-- Email categories and corresponding folders
-- Processing options
+1. Copy `.env.example` to `.env`:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Edit `.env` to set:
+   - IMAP server details (provided by Proton Mail Bridge)
+   - Email credentials
+   - LLM server endpoint
+   - Processing options
+
+   **Note for Proton Mail Bridge users**: If your Proton Mail Bridge shows "STARTTLS" as the security setting, set `IMAP_USE_SSL=False` in your `.env` file. The application will automatically handle the STARTTLS connection.
+
+3. You can also customize email categories by editing `config.py`:
+   - Email categories and corresponding folders
+   - Classification prompt template
 
 ## Scheduling
 

@@ -45,9 +45,12 @@ class EmailProcessor:
         """
         try:
             if self.use_ssl:
+                # Use SSL/TLS from the beginning
                 self.connection = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
             else:
+                # Start with plain connection, STARTTLS will be used if supported by server
                 self.connection = imaplib.IMAP4(self.imap_server, self.imap_port)
+                # Note: imaplib.IMAP4 automatically handles STARTTLS if the server supports it
             
             self.connection.login(self.username, self.password)
             logger.info(f"Successfully connected to {self.imap_server}")
