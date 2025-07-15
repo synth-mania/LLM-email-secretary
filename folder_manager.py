@@ -23,10 +23,12 @@ class FolderManager:
 
     def ensure_category_folders_exist(self) -> bool:
         """
-        Ensure that all folders for the defined categories exist.
+        Check if all folders for the defined categories exist.
+        Note: This method does not create folders, as Proton Mail Bridge has limitations on folder creation.
+        Users must create the folders manually through the Proton Mail interface.
         
         Returns:
-            bool: True if all folders exist or were created successfully, False otherwise.
+            bool: True if all folders exist, False otherwise.
         """
         if not self.email_processor.connect():
             logger.error("Failed to connect to email server")
@@ -34,9 +36,10 @@ class FolderManager:
         
         success = True
         try:
+            folders = self.email_processor.get_folders()
             for category, folder_name in self.category_folders.items():
-                if not self.email_processor.create_folder_if_not_exists(folder_name):
-                    logger.error(f"Failed to create folder for category '{category}': {folder_name}")
+                if folder_name not in folders:
+                    logger.warning(f"Folder '{folder_name}' for category '{category}' does not exist. Please create it manually in Proton Mail.")
                     success = False
         finally:
             self.email_processor.disconnect()

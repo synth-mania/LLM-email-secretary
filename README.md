@@ -59,7 +59,12 @@ email_classifier/
 
    **Note for Proton Mail Bridge users**: If your Proton Mail Bridge shows "STARTTLS" as the security setting, set `IMAP_USE_SSL=False` in your `.env` file. The application will automatically handle the STARTTLS connection.
 
-3. You can also customize email categories by editing `config.py`:
+3. **Important**: Create folders in Proton Mail that match the folder names in `config.py`:
+   - By default, you need to create folders named: `ManualReview`, `Bills`, and `Promotions`
+   - The application cannot create these folders automatically due to Proton Mail Bridge limitations
+   - You can create these folders through the Proton Mail web interface or mobile app
+
+4. You can also customize email categories by editing `config.py`:
    - Email categories and corresponding folders
    - Classification prompt template
 

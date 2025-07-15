@@ -9,7 +9,7 @@ import re
 from typing import List, Dict, Tuple, Optional, Any
 import time
 
-from config import EMAIL_CONFIG, PROCESSING_CONFIG
+from config import EMAIL_CONFIG, PROCESSING_CONFIG, EMAIL_CATEGORIES
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -121,13 +121,27 @@ class EmailProcessor:
             if folder_name in folders:
                 return True
             
-            status, response = self.connection.create(f'"{folder_name}"')
-            if status == 'OK':
-                logger.info(f"Created folder: {folder_name}")
-                return True
-            else:
-                logger.error(f"Failed to create folder {folder_name}: {response}")
-                return False
+            # Try different formats for folder creation
+            # Some IMAP servers are picky about the format
+            formats_to_try = [
+                f'"{folder_name}"',  # Standard format with quotes
+                folder_name,         # Without quotes
+                f'INBOX.{folder_name}'  # As a subfolder of INBOX
+            ]
+            
+            for folder_format in formats_to_try:
+                try:
+                    status, response = self.connection.create(folder_format)
+                    if status == 'OK':
+                        logger.info(f"Created folder: {folder_name}")
+                        return True
+                except Exception as e:
+                    logger.debug(f"Failed to create folder with format {folder_format}: {e}")
+                    continue
+            
+            # If we get here, all formats failed
+            logger.error(f"Failed to create folder {folder_name} with all attempted formats")
+            return False
         except Exception as e:
             logger.error(f"Error creating folder {folder_name}: {e}")
             return False
@@ -204,8 +218,16 @@ class EmailProcessor:
         if not self.skip_processed:
             email_ids = self.search_emails('ALL')
         else:
-            # Search for emails without our processed flag
-            email_ids = self.search_emails('NOT KEYWORD "PROCESSED"')
+            try:
+                # Try to search for emails without our processed flag
+                # Some IMAP servers might not support KEYWORD search
+                email_ids = self.search_emails('NOT KEYWORD PROCESSED')
+            except Exception as e:
+                logger.warning(f"Failed to search with KEYWORD criteria: {e}")
+                # Fall back to getting all emails
+                email_ids = self.search_emails('ALL')
+                
+                # We'll filter processed emails manually later in the process_emails method
         
         # Apply limit if specified
         if limit and len(email_ids) > limit:
@@ -405,8 +427,10 @@ class EmailProcessor:
             if not self.connect():
                 return False
         
-        # Ensure destination folder exists
-        if not self.create_folder_if_not_exists(destination_folder):
+        # Check if destination folder exists (don't try to create it)
+        folders = self.get_folders()
+        if destination_folder not in folders:
+            logger.warning(f"Destination folder '{destination_folder}' does not exist. Please create it manually in Proton Mail.")
             return False
         
         # Select source folder
