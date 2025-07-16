@@ -40,10 +40,11 @@ PROCESSING_CONFIG = {
 # Email Categories and Corresponding Folders
 # These are the categories that the LLM will classify emails into
 # The key is the category name, and the value is the folder name in Proton Mail
+# Note: Folder names should include the 'Folders/' or 'Labels/' prefix as exposed by Proton Mail Bridge
 EMAIL_CATEGORIES = {
-    'requires_manual_intervention': 'Manual Review',
-    'bills': 'Bills',
-    'promotional': 'Promotions',
+    'requires_manual_intervention': 'Folders/ManualReview',
+    'bills': 'Folders/Bills',
+    'promotional': 'Folders/Promotions',
     # Add more categories as needed
 }
 
@@ -53,12 +54,23 @@ CLASSIFICATION_PROMPT_TEMPLATE = """
 You are an email classification assistant. Your task is to categorize the following email into exactly one of these categories:
 {categories}
 
+Category Definitions:
+- 'requires_manual_intervention': Emails that need personal attention, such as personal correspondence, important questions, or anything that requires a human response. This includes emails from friends, family, or colleagues discussing personal matters.
+- 'bills': Emails related to financial transactions, invoices, receipts, payment confirmations, account statements, or any financial notifications.
+- 'promotional': Marketing emails, newsletters, advertisements, special offers, updates from companies, or any non-personal mass communications.
+
 Email:
 Subject: {subject}
 From: {sender}
 Date: {date}
 Body:
 {body}
+
+Guidelines for classification:
+1. For emails that are part of ongoing conversations (like "Re:" threads), classify based on the content and context, not just the subject line.
+2. Newsletters and updates from companies should generally be 'promotional' unless they contain billing information.
+3. Only use 'requires_manual_intervention' when the email truly needs personal attention or response.
+4. Account statements, payment confirmations, and receipts should be classified as 'bills'.
 
 Analyze the content and respond with only the category name that best matches this email.
 """

@@ -77,11 +77,19 @@ def main():
     parser.add_argument('--add-category', nargs=2, metavar=('CATEGORY', 'FOLDER'), help='Add a new category and folder')
     parser.add_argument('--remove-category', metavar='CATEGORY', help='Remove a category')
     parser.add_argument('--process', action='store_true', help='Process emails (default action)')
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     
     args = parser.parse_args()
     
     # Set up logging
     setup_logging()
+    
+    # Enable debug logging if requested
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.getLogger('email_processor').setLevel(logging.DEBUG)
+        logging.getLogger('folder_manager').setLevel(logging.DEBUG)
+        logging.info("Debug logging enabled")
     
     logger.info("Starting Email Classifier")
     

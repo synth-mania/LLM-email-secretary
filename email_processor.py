@@ -5,9 +5,11 @@ import imaplib
 import email
 from email.header import decode_header
 import logging
+import os
 import re
 from typing import List, Dict, Tuple, Optional, Any
 import time
+import ssl
 
 from config import EMAIL_CONFIG, PROCESSING_CONFIG, EMAIL_CATEGORIES
 
@@ -44,17 +46,34 @@ class EmailProcessor:
             bool: True if connection was successful, False otherwise.
         """
         try:
-            if self.use_ssl:
-                # Use SSL/TLS from the beginning
-                self.connection = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
-            else:
-                # Start with plain connection, STARTTLS will be used if supported by server
-                self.connection = imaplib.IMAP4(self.imap_server, self.imap_port)
-                # Note: imaplib.IMAP4 automatically handles STARTTLS if the server supports it
+            # Try different connection methods
+            try:
+                if self.use_ssl:
+                    # Try with SSL first
+                    logger.debug("Attempting to connect with SSL")
+                    self.connection = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
+                else:
+                    # Try without SSL
+                    logger.debug("Attempting to connect without SSL")
+                    self.connection = imaplib.IMAP4(self.imap_server, self.imap_port)
+            except Exception as e:
+                logger.debug(f"First connection attempt failed: {e}")
+                # If the first attempt fails, try the opposite approach
+                if self.use_ssl:
+                    logger.debug("Retrying without SSL")
+                    self.connection = imaplib.IMAP4(self.imap_server, self.imap_port)
+                else:
+                    logger.debug("Retrying with SSL")
+                    self.connection = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
             
+            # Login to the server
             self.connection.login(self.username, self.password)
+            
             logger.info(f"Successfully connected to {self.imap_server}")
             return True
+        except imaplib.IMAP4.error as e:
+            logger.error(f"Failed to login to IMAP server: {e}")
+            return False
         except Exception as e:
             logger.error(f"Failed to connect to IMAP server: {e}")
             return False
@@ -91,12 +110,35 @@ class EmailProcessor:
             folder_list = []
             for folder in folders:
                 if isinstance(folder, bytes):
-                    folder = folder.decode('utf-8')
-                # Extract folder name using regex
+                    folder = folder.decode('utf-8', errors='replace')
+                
+                logger.debug(f"Raw folder entry: {folder}")
+                
+                # Try different regex patterns to extract folder names
+                # Pattern 1: Standard quoted format at the end
                 match = re.search(r'"([^"]*)"$', folder)
                 if match:
                     folder_list.append(match.group(1))
+                    continue
+                
+                # Pattern 2: Look for folder name after the last delimiter
+                match = re.search(r'(?:\s|\|)\s*"?([^"]+)"?$', folder)
+                if match:
+                    folder_list.append(match.group(1))
+                    continue
+                
+                # Pattern 3: Look for anything after "INBOX."
+                match = re.search(r'INBOX\.(.+?)(?:\s|$)', folder)
+                if match:
+                    folder_list.append(match.group(1))
+                    continue
+                
+                # Add INBOX if it's in the response
+                if "INBOX" in folder:
+                    if "INBOX" not in folder_list:
+                        folder_list.append("INBOX")
             
+            logger.info(f"Detected folders: {folder_list}")
             return folder_list
         except Exception as e:
             logger.error(f"Error getting folders: {e}")
@@ -126,11 +168,15 @@ class EmailProcessor:
             formats_to_try = [
                 f'"{folder_name}"',  # Standard format with quotes
                 folder_name,         # Without quotes
-                f'INBOX.{folder_name}'  # As a subfolder of INBOX
+                f'INBOX.{folder_name}',  # As a subfolder of INBOX
+                f'INBOX/{folder_name}',  # As a subfolder of INBOX with slash
+                f'Folders/{folder_name}',  # As a subfolder of Folders
+                f'Labels/{folder_name}'  # As a subfolder of Labels
             ]
             
             for folder_format in formats_to_try:
                 try:
+                    logger.debug(f"Attempting to create folder with format: {folder_format}")
                     status, response = self.connection.create(folder_format)
                     if status == 'OK':
                         logger.info(f"Created folder: {folder_name}")
@@ -161,14 +207,31 @@ class EmailProcessor:
                 return -1
         
         try:
-            status, data = self.connection.select(f'"{folder_name}"')
-            if status == 'OK':
-                message_count = int(data[0])
-                logger.info(f"Selected folder {folder_name} with {message_count} messages")
-                return message_count
-            else:
-                logger.error(f"Failed to select folder {folder_name}: {data}")
-                return -1
+            # Try different formats for folder selection
+            formats_to_try = [
+                folder_name,                # Standard format
+                f'"{folder_name}"',         # Quoted format
+                f'INBOX/{folder_name}',     # As a subfolder of INBOX with slash
+                f'INBOX.{folder_name}',     # As a subfolder of INBOX with dot
+                f'Folders/{folder_name}',   # As a subfolder of Folders
+                f'Labels/{folder_name}'     # As a subfolder of Labels
+            ]
+            
+            for folder_format in formats_to_try:
+                try:
+                    logger.debug(f"Attempting to select folder with format: {folder_format}")
+                    status, data = self.connection.select(folder_format)
+                    if status == 'OK':
+                        message_count = int(data[0])
+                        logger.info(f"Selected folder {folder_name} with {message_count} messages")
+                        return message_count
+                except Exception as e:
+                    logger.debug(f"Failed to select folder with format {folder_format}: {e}")
+                    continue
+            
+            # If we get here, all formats failed
+            logger.error(f"Failed to select folder {folder_name} with all attempted formats")
+            return -1
         except Exception as e:
             logger.error(f"Error selecting folder {folder_name}: {e}")
             return -1
@@ -411,6 +474,85 @@ class EmailProcessor:
         
         return attachments
 
+    def folder_exists(self, folder_name: str) -> bool:
+        """
+        Check if a folder actually exists by trying to select it.
+        
+        Args:
+            folder_name: Name of the folder to check.
+            
+        Returns:
+            bool: True if the folder exists, False otherwise.
+        """
+        if not self.connection:
+            if not self.connect():
+                return False
+        
+        try:
+            # Get the raw folder list first for debugging
+            status, folders_raw = self.connection.list()
+            if status == 'OK':
+                logger.debug(f"Raw folder list from IMAP server:")
+                for f in folders_raw:
+                    if isinstance(f, bytes):
+                        f_str = f.decode('utf-8', errors='replace')
+                    else:
+                        f_str = str(f)
+                    logger.debug(f"  {f_str}")
+            
+            # Check if the folder exists in the folder list
+            folders = self.get_folders()
+            if folder_name in folders:
+                logger.info(f"Folder '{folder_name}' exists in folder list")
+                return True
+            
+            # Try different formats for the folder name
+            formats_to_check = [
+                folder_name.upper(),        # Uppercase
+                folder_name.lower(),        # Lowercase
+                f'INBOX/{folder_name}',     # As a subfolder of INBOX with slash
+                f'INBOX.{folder_name}',     # As a subfolder of INBOX with dot
+                f'Folders/{folder_name}',   # As a subfolder of Folders
+                f'Labels/{folder_name}'     # As a subfolder of Labels
+            ]
+            
+            for folder_format in formats_to_check:
+                if folder_format in folders:
+                    logger.info(f"Folder '{folder_name}' exists with format: {folder_format}")
+                    return True
+            
+            # Try to select the folder directly using different formats
+            formats_to_try = [
+                folder_name,                # Standard format
+                f'"{folder_name}"',         # Quoted format
+                folder_name.upper(),        # Uppercase
+                folder_name.lower(),        # Lowercase
+                f'INBOX/{folder_name}',     # As a subfolder of INBOX with slash
+                f'INBOX.{folder_name}',     # As a subfolder of INBOX with dot
+                f'Folders/{folder_name}',   # As a subfolder of Folders
+                f'Labels/{folder_name}'     # As a subfolder of Labels
+            ]
+            
+            for folder_format in formats_to_try:
+                try:
+                    logger.debug(f"Trying to select folder with format: {folder_format}")
+                    status, data = self.connection.select(folder_format)
+                    if status == 'OK':
+                        # Deselect the folder by selecting INBOX
+                        self.connection.select('INBOX')
+                        logger.info(f"Verified folder '{folder_name}' exists with format: {folder_format}")
+                        return True
+                except Exception as e:
+                    logger.debug(f"Exception when selecting {folder_format}: {e}")
+                    continue
+            
+            # If we get here, the folder doesn't exist
+            logger.warning(f"Folder '{folder_name}' does not exist or cannot be selected")
+            return False
+        except Exception as e:
+            logger.error(f"Error checking if folder '{folder_name}' exists: {e}")
+            return False
+
     def move_email(self, email_id: str, source_folder: str, destination_folder: str) -> bool:
         """
         Move an email from one folder to another.
@@ -427,40 +569,109 @@ class EmailProcessor:
             if not self.connect():
                 return False
         
-        # Check if destination folder exists (don't try to create it)
-        folders = self.get_folders()
-        if destination_folder not in folders:
+        # Check if destination folder actually exists by trying to select it
+        if not self.folder_exists(destination_folder):
             logger.warning(f"Destination folder '{destination_folder}' does not exist. Please create it manually in Proton Mail.")
+            logger.warning(f"Marking email as processed without moving it.")
+            self.mark_as_processed(email_id)
             return False
         
         # Select source folder
         if self.select_folder(source_folder) <= 0:
             return False
         
-        try:
-            # Copy the email to the destination folder
-            status, data = self.connection.copy(email_id, f'"{destination_folder}"')
-            if status != 'OK':
-                logger.error(f"Failed to copy email {email_id} to {destination_folder}: {data}")
-                return False
-            
-            # Mark the original email for deletion
-            status, data = self.connection.store(email_id, '+FLAGS', '\\Deleted')
-            if status != 'OK':
-                logger.error(f"Failed to mark email {email_id} for deletion: {data}")
-                return False
-            
-            # Expunge to actually delete the email
-            status, data = self.connection.expunge()
-            if status != 'OK':
-                logger.error(f"Failed to expunge mailbox: {data}")
-                return False
-            
-            logger.info(f"Successfully moved email {email_id} from {source_folder} to {destination_folder}")
-            return True
-        except Exception as e:
-            logger.error(f"Error moving email {email_id}: {e}")
-            return False
+        # Maximum number of retries
+        max_retries = 3
+        retry_delay = 2  # seconds
+        
+        for retry in range(max_retries):
+            try:
+                # Try to use the MOVE command directly if supported
+                try:
+                    logger.debug(f"Attempting to move email {email_id} using MOVE command")
+                    # Check if MOVE is supported
+                    capabilities = self.connection.capabilities
+                    if b'MOVE' in capabilities:
+                        logger.debug("Server supports MOVE command")
+                        status, data = self.connection.uid('MOVE', email_id, destination_folder)
+                        if status == 'OK':
+                            logger.info(f"Successfully moved email {email_id} from {source_folder} to {destination_folder} using MOVE command")
+                            return True
+                    else:
+                        logger.debug("Server does not support MOVE command, falling back to copy+delete")
+                except Exception as e:
+                    logger.debug(f"Error using MOVE command: {e}")
+                
+                # Fall back to copy+delete method
+                # Try different formats for the destination folder
+                formats_to_try = [
+                    destination_folder,                # Standard format
+                    f'"{destination_folder}"',         # Quoted format
+                    f'INBOX/{destination_folder}',     # As a subfolder of INBOX with slash
+                    f'INBOX.{destination_folder}',     # As a subfolder of INBOX with dot
+                    f'Folders/{destination_folder}',   # As a subfolder of Folders
+                    f'Labels/{destination_folder}',    # As a subfolder of Labels
+                    destination_folder.upper(),        # Uppercase
+                    destination_folder.lower()         # Lowercase
+                ]
+                
+                copy_success = False
+                for folder_format in formats_to_try:
+                    try:
+                        logger.debug(f"Trying to copy email to folder format: {folder_format}")
+                        status, data = self.connection.copy(email_id, folder_format)
+                        if status == 'OK':
+                            logger.info(f"Successfully copied email {email_id} to {destination_folder} using format {folder_format}")
+                            copy_success = True
+                            break
+                    except Exception as e:
+                        logger.debug(f"Failed to copy email with format {folder_format}: {e}")
+                        continue
+                
+                if not copy_success:
+                    if retry < max_retries - 1:
+                        logger.warning(f"Failed to copy email on attempt {retry+1}, retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        logger.error(f"Failed to copy email {email_id} to {destination_folder} with all attempted formats after {max_retries} retries")
+                        # Mark as processed even if we couldn't move it
+                        self.mark_as_processed(email_id)
+                        return False
+                
+                # Mark the original email for deletion
+                status, data = self.connection.store(email_id, '+FLAGS', '\\Deleted')
+                if status != 'OK':
+                    logger.error(f"Failed to mark email {email_id} for deletion: {data}")
+                    # Even if deletion fails, we've at least copied the email
+                    # Mark as processed and return partial success
+                    self.mark_as_processed(email_id)
+                    return True
+                
+                # Expunge to actually delete the email
+                status, data = self.connection.expunge()
+                if status != 'OK':
+                    logger.error(f"Failed to expunge mailbox: {data}")
+                    # Even if expunge fails, we've at least copied the email and marked for deletion
+                    # Mark as processed and return partial success
+                    self.mark_as_processed(email_id)
+                    return True
+                
+                logger.info(f"Successfully moved email {email_id} from {source_folder} to {destination_folder}")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error moving email {email_id} (attempt {retry+1}): {e}")
+                if retry < max_retries - 1:
+                    logger.warning(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(f"Failed to move email after {max_retries} attempts")
+                    # Mark as processed even if we couldn't move it
+                    self.mark_as_processed(email_id)
+                    return False
+        
+        return False
 
     def mark_as_processed(self, email_id: str) -> bool:
         """
@@ -504,6 +715,19 @@ class EmailProcessor:
         processed_count = 0
         success_count = 0
         
+        # Check if we're in dry run mode (don't move emails, just classify)
+        dry_run = os.environ.get('DRY_RUN', 'false').lower() == 'true'
+        if dry_run:
+            logger.info("Running in DRY RUN mode - emails will be classified but not moved")
+        
+        # Verify that destination folders exist
+        folder_exists_cache = {}
+        for category, folder_name in EMAIL_CATEGORIES.items():
+            folder_exists_cache[folder_name] = self.folder_exists(folder_name)
+            if not folder_exists_cache[folder_name]:
+                logger.warning(f"Destination folder '{folder_name}' for category '{category}' does not exist.")
+                logger.warning(f"Please create it manually in Proton Mail or emails will be classified but not moved.")
+        
         try:
             for folder in self.folders_to_process:
                 logger.info(f"Processing folder: {folder}")
@@ -534,12 +758,25 @@ class EmailProcessor:
                             if category and category in EMAIL_CATEGORIES:
                                 destination_folder = EMAIL_CATEGORIES[category]
                                 
-                                # Move the email to the appropriate folder
-                                if self.move_email(email_id, folder, destination_folder):
+                                # Check if we should run in dry run mode
+                                # Either explicitly enabled or the destination folder doesn't exist
+                                should_dry_run = dry_run or not folder_exists_cache.get(destination_folder, False)
+                                
+                                if should_dry_run:
+                                    # In dry run mode, just log the classification and mark as processed
+                                    dry_run_reason = "DRY RUN mode" if dry_run else f"folder '{destination_folder}' does not exist"
+                                    logger.info(f"[{dry_run_reason}] Email {email_id} - Subject: '{email_data.get('subject', '')}' - "
+                                               f"From: '{email_data.get('sender', '')}' would be moved to {destination_folder}")
+                                    self.mark_as_processed(email_id)
                                     success_count += 1
                                 else:
-                                    # If move fails, at least mark as processed
-                                    self.mark_as_processed(email_id)
+                                    # Move the email to the appropriate folder
+                                    if self.move_email(email_id, folder, destination_folder):
+                                        success_count += 1
+                                    else:
+                                        # If move fails, at least mark as processed
+                                        logger.warning(f"Failed to move email to {destination_folder}, marking as processed only")
+                                        self.mark_as_processed(email_id)
                             else:
                                 # Unknown category, just mark as processed
                                 logger.warning(f"Unknown category '{category}' for email {email_id}")
